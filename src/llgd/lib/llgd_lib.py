@@ -4,19 +4,18 @@ Logitech Litra Glow and Logitech Litra Beam
 """
 import logging
 import math
-import usb.core
-import usb.util
+import hid
 from llgd.config.llgd_config import LlgdConfig
 
 VENDOR_ID = 0x046d
 LITRA_PRODUCTS = [{'name': 'Glow',
                    'id': 0xc900,
-                   'endpoint': 0x02,
+                   'usage': 0x202,
                    'buffer_length': 64},
 
                   {'name': 'Beam',
                    'id': 0xc901,
-                   'endpoint': 0x01,
+                   'usage': 0x202,
                    'buffer_length': 32},
                   ]
 
@@ -26,22 +25,23 @@ TIMEOUT_MS = 3000
 MIN_BRIGHTNESS = 0x14
 MAX_BRIGHTNESS = 0xfa
 
-endpoint_mapping={}
+
 buffer_length_mapping={}
 config = LlgdConfig()
-devices = []
+devices = {}
 
 def find_devices():
     """ Search for Litra Devices
     """
     logging.info("Searching for litra devices...")
     for product in LITRA_PRODUCTS:
-        product_devices = usb.core.find(idVendor=VENDOR_ID, idProduct=product['id'], find_all=True)
+        product_devices = hid.enumerate(vendor_id=VENDOR_ID, product_id=product['id'])
         for product_device in product_devices:
-            logging.info('Found Device "%s"', product_device.product)
-            endpoint_mapping[product_device]=product['endpoint']
-            buffer_length_mapping[product_device]=product['buffer_length']
-            devices.append(product_device)
+            if "usage" in product_device and product_device["usage"] == product['usage']:
+                serial = product_device["serial_number"]
+                logging.info("Found Device: {} with serial {}".format(product_device["product_string"], serial))
+                buffer_length_mapping[serial] = product['buffer_length']
+                devices[serial] = product_device
 
 def count():
     """ Returns a count of all devices
@@ -58,60 +58,45 @@ def setup(index):
         [device, reattach]: where device is a Device object and reattach
         is a bool indicating whether the kernel driver should be reattached
     """
-    dev = devices[index]
-    if dev is None:
+    if index > len(devices):
         raise ValueError('Device not found')
+    
+    dev_path = devices[list(devices.keys())[index]]["path"]
+    dev = hid.device()
+    dev.open_path(dev_path)
+    
+    logging.debug(dev_path)
 
-    reattach = False
+    return dev
 
-    try:
-        if dev.is_kernel_driver_active(0):
-            logging.debug("kernel driver active")
-            reattach = True
-            dev.detach_kernel_driver(0)
-        else:
-            logging.debug("kernel driver not active")
-
-    except AttributeError:
-        logging.debug(
-            '"is_kernel_driver_active()" method not found. Continuing')
-
-    logging.debug(dev)
-    dev.set_configuration()
-    usb.util.claim_interface(dev, 0)
-
-    return dev, reattach
-
-def teardown(dev, reattach):
+def teardown(dev):
     """Tears down the device
     """
-    usb.util.dispose_resources(dev)
-    if reattach:
-        dev.attach_kernel_driver(0)
+    dev.close()
 
 
 def light_on():
     """Turns on the light
     """
     for index in range(0, count()):
-        dev, reattach = setup(index)
-        dev.write(endpoint_mapping[dev], [0x11, 0xff, 0x04, 0x1c, LIGHT_ON, 0x00, 0x00, 0x00, 0x00, 0x00,
-                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], TIMEOUT_MS)
-        dev.read(endpoint_mapping[dev], buffer_length_mapping[dev])
+        dev = setup(index)
+        dev.write([0x11, 0xff, 0x04, 0x1c, LIGHT_ON, 0x00, 0x00, 0x00, 0x00, 0x00,
+                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        #dev.read(buffer_length_mapping[dev])
         logging.info("Light On")
-        teardown(dev, reattach)
+        teardown(dev)
 
 
 def light_off():
     """Turns off the light
     """
     for index in range(0, count()):
-        dev, reattach = setup(index)
-        dev.write(endpoint_mapping[dev], [0x11, 0xff, 0x04, 0x1c, LIGHT_OFF, 0x00, 0x00, 0x00, 0x00, 0x00,
-                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], TIMEOUT_MS)
-        dev.read(endpoint_mapping[dev], buffer_length_mapping[dev])
+        dev = setup(index)
+        dev.write([0x11, 0xff, 0x04, 0x1c, LIGHT_OFF, 0x00, 0x00, 0x00, 0x00, 0x00,
+                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        #dev.read(usage_mapping[dev], buffer_length_mapping[dev])
         logging.info("Light Off")
-        teardown(dev, reattach)
+        teardown(dev)
 
 
 def set_brightness(level):
@@ -122,15 +107,15 @@ def set_brightness(level):
         max brightness levels supported by the device.
     """
     for index in range(0, count()):
-        dev, reattach = setup(index)
+        dev = setup(index)
         adjusted_level = math.floor(
             MIN_BRIGHTNESS + ((level/100) * (MAX_BRIGHTNESS - MIN_BRIGHTNESS)))
-        dev.write(endpoint_mapping[dev], [0x11, 0xff, 0x04, 0x4c, 0x00, adjusted_level, 0x00, 0x00, 0x00, 0x00,
-                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], TIMEOUT_MS)
-        dev.read(endpoint_mapping[dev], buffer_length_mapping[dev])
+        dev.write( [0x11, 0xff, 0x04, 0x4c, 0x00, adjusted_level, 0x00, 0x00, 0x00, 0x00,
+                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        #dev.read(usage_mapping[dev], buffer_length_mapping[dev])
         config.update_current_state(brightness=level)
         logging.info("Brightness set to %d", level)
-        teardown(dev, reattach)
+        teardown(dev)
 
 
 def set_temperature(temp):
@@ -140,14 +125,13 @@ def set_temperature(temp):
         temp (int): A color temperature of between 2700 and 6500
     """
     for index in range(0, count()):
-        dev, reattach = setup(index)
+        dev = setup(index)
         byte_array = temp.to_bytes(2, 'big')
-        dev.write(endpoint_mapping[dev], [0x11, 0xff, 0x04, 0x9c, byte_array[0], byte_array[1], 0x00, 0x00,
-                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-                  TIMEOUT_MS)
-        dev.read(endpoint_mapping[dev], buffer_length_mapping[dev])
+        dev.write([0x11, 0xff, 0x04, 0x9c, byte_array[0], byte_array[1], 0x00, 0x00,
+                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        #dev.read(usage_mapping[dev], buffer_length_mapping[dev])
         config.update_current_state(temp=temp)
         logging.info("Temperature set to %d", temp)
-        teardown(dev, reattach)
+        teardown(dev)
 
 find_devices()
